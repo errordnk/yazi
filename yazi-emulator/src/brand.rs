@@ -27,6 +27,7 @@ pub enum Brand {
 	Apple,
 	Urxvt,
 	Bobcat,
+	Som,
 }
 
 impl Brand {
@@ -50,6 +51,7 @@ impl Brand {
 
 	pub fn from_env() -> Option<Self> {
 		let vars = [
+			("SOM_WINDOW_ID", Self::Som),
 			("KITTY_WINDOW_ID", Self::Kitty),
 			("KONSOLE_VERSION", Self::Konsole),
 			("ITERM_SESSION_ID", Self::Iterm2),

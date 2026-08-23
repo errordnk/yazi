@@ -1,9 +1,20 @@
 local M = {}
 
 function M:peek(job)
-	local start, url = os.clock(), ya.file_cache(job)
-	if not url or not fs.cha(url) then
-		url = Url(job.file.path)
+	local start = os.clock()
+	local url = Url(job.file.path)
+
+	-- The precache below (see `preload`) re-encodes to a single static
+	-- PNG/JPEG frame, which is correct for a still image but silently
+	-- throws away every frame after the first for a GIF — SRP's own
+	-- driver plays the animation itself once Som has the real file, so a
+	-- GIF must always go through as the original file, never the cache,
+	-- regardless of whether a cache entry already exists.
+	if tostring(job.file.url.ext or ""):lower() ~= "gif" then
+		local cache = ya.file_cache(job)
+		if cache and fs.cha(cache) then
+			url = cache
+		end
 	end
 
 	ya.sleep(math.max(0, rt.preview.image_delay / 1000 + start - os.clock()))

@@ -64,6 +64,7 @@ impl From<Brand> for Drivers {
 			B::Apple => vec![],
 			B::Urxvt => vec![],
 			B::Bobcat => vec![D::Iip, D::Sixel],
+			B::Som => vec![D::Srp],
 		})
 	}
 }

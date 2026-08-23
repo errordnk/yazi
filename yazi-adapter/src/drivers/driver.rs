@@ -4,7 +4,7 @@ use anyhow::Result;
 use ratatui_core::layout::Rect;
 use strum::{Display, IntoStaticStr};
 
-use crate::drivers::{Chafa, Iip, Kgp, KgpOld, Sixel, Ueberzug};
+use crate::drivers::{Chafa, Iip, Kgp, KgpOld, Sixel, Srp, Ueberzug};
 
 #[derive(Clone, Copy, Debug, Display, Eq, IntoStaticStr, PartialEq)]
 #[strum(serialize_all = "kebab-case")]
@@ -13,6 +13,7 @@ pub enum Driver {
 	KgpOld,
 	Iip,
 	Sixel,
+	Srp,
 
 	// Supported by Überzug++
 	X11,
@@ -35,6 +36,7 @@ impl Driver {
 			Self::KgpOld => KgpOld::image_show(path, max).await,
 			Self::Iip => Iip::image_show(path, max).await,
 			Self::Sixel => Sixel::image_show(path, max).await,
+			Self::Srp => Srp::image_show(path, max).await,
 			Self::X11 | Self::Wayland => Ueberzug::image_show(path, max).await,
 			Self::Chafa => Chafa::image_show(path, max).await,
 		}
@@ -46,6 +48,7 @@ impl Driver {
 			Self::KgpOld => KgpOld::image_erase(area),
 			Self::Iip => Iip::image_erase(area),
 			Self::Sixel => Sixel::image_erase(area),
+			Self::Srp => Srp::image_erase(area),
 			Self::X11 | Self::Wayland => Ueberzug::image_erase(area),
 			Self::Chafa => Chafa::image_erase(area),
 		}
@@ -54,6 +57,6 @@ impl Driver {
 	pub(crate) fn start(self) { Ueberzug::start(self); }
 
 	pub(crate) fn needs_ueberzug(self) -> bool {
-		!matches!(self, Self::Kgp | Self::KgpOld | Self::Iip | Self::Sixel)
+		!matches!(self, Self::Kgp | Self::KgpOld | Self::Iip | Self::Sixel | Self::Srp)
 	}
 }
