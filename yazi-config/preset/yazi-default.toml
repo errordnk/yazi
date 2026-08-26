@@ -125,6 +125,8 @@ spotters = [
 	{ mime = "image/*", run = "image" },
 	# Video
 	{ mime = "video/*", run = "video" },
+	# Audio
+	{ mime = "audio/*", run = "audio" },
 	# Virtual file system
 	{ mime = "vfs/*", run = "vfs" },
 	# Trash
@@ -162,6 +164,8 @@ previewers = [
 	{ mime = "image/*", run = "image" },
 	# Video
 	{ mime = "video/*", run = "video" },
+	# Audio
+	{ mime = "audio/*", run = "audio" },
 	# PDF
 	{ mime = "application/pdf", run = "pdf" },
 	# Archive

@@ -1,12 +1,12 @@
 use std::{fmt::{self, Debug}, path::PathBuf, sync::OnceLock};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use ratatui_core::layout::Rect;
 use yazi_emulator::EMULATOR;
 use yazi_shim::cell::SyncCell;
 use yazi_widgets::clear::ClearInventory;
 
-use crate::{ADAPTOR, drivers::{Driver, Drivers}};
+use crate::{ADAPTOR, drivers::{Driver, Drivers, Srp}};
 
 #[derive(Default)]
 pub struct Adapter {
@@ -46,6 +46,37 @@ impl Adapter {
 			Some(driver) => driver.image_erase(area),
 			None => Ok(()),
 		}
+	}
+
+	/// Audio's counterpart to [`Self::image_show`] — unlike every other
+	/// content type this adapter shows, only [`Driver::Srp`] speaks audio
+	/// at all (decoding/playback happen on Som's own receiving end, not
+	/// in this process at all — see `Srp::audio_show`'s own doc comment),
+	/// so this bypasses `Driver::image_show`'s per-driver dispatch and
+	/// calls `Srp` directly. Errors instead of silently doing nothing if
+	/// the resolved driver isn't `Srp` — a caller (the `audio.lua`
+	/// previewer) is expected to check `SOM_WINDOW_ID`/`Brand::Som`
+	/// itself before ever reaching this call, so landing here on a
+	/// different driver means that check was skipped or wrong, not a
+	/// normal "this terminal doesn't support audio previews" case that
+	/// should fail quietly.
+	pub async fn audio_show<P>(&self, path: P, max: Rect) -> Result<Rect>
+	where
+		P: Into<PathBuf>,
+	{
+		let probe = &EMULATOR.probe;
+		probe.wait(probe.id.get()).await;
+
+		let driver = self.driver.get_or_init(|| {
+			let driver = Drivers::matches(&EMULATOR);
+			driver.start();
+			driver
+		});
+		if *driver != Driver::Srp {
+			bail!("audio preview requires Som's SRP driver, resolved driver is {driver}");
+		}
+
+		Srp::audio_show(path.into(), max).await
 	}
 
 	pub fn shown_area(&self) -> Option<Rect> { self.shown.get() }

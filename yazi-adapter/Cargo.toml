@@ -33,4 +33,5 @@ palette      = { version = "0.7.7", default-features = false }
 quantette    = { version = "0.6.0", default-features = false }
 ratatui-core = { workspace = true }
 strum        = { workspace = true }
+symphonia    = { version = "0.5", features = [ "mp3", "flac" ] }
 tokio        = { workspace = true }

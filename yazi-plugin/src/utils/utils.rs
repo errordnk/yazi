@@ -24,6 +24,9 @@ pub fn compose(
 			b"image_show" => Utils::image_show(lua)?,
 			b"image_precache" => Utils::image_precache(lua)?,
 
+			// Audio
+			b"audio_show" => Utils::audio_show(lua)?,
+
 			// JSON
 			b"json_encode" => Utils::json_encode(lua)?,
 			b"json_decode" => Utils::json_decode(lua)?,
