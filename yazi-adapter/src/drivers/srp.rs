@@ -75,12 +75,17 @@ const METADATA_FIELDS_LEN: usize = 17;
 
 /// Fixed cell footprint for the audio widget Som paints — audio has no
 /// pixel dimensions to derive a footprint from the way an image does, so
-/// this driver reserves a constant-size placeholder grid instead, same
-/// principle `somcat`'s own `AUDIO_WIDGET_COLUMNS`/`AUDIO_WIDGET_ROWS`
-/// constants use (kept in sync with that reference client's values: 40
-/// columns for the play/pause glyph, seek bar, and elapsed/total time
-/// text, plus 2 more for a trailing close glyph).
-const AUDIO_WIDGET_COLUMNS: u16 = 42;
+/// this driver reserves a constant-size placeholder grid instead. 40
+/// columns: play/pause glyph, seek bar, elapsed/total time text — NOT
+/// the extra 2 columns `somcat`'s own `AUDIO_WIDGET_COLUMNS` reserves
+/// for a trailing close glyph. Som paints a close glyph only when the
+/// reserved footprint has room for it, so this narrower footprint is
+/// what makes a yazi preview close-glyph-free by construction: closing
+/// a preview isn't a click-to-dismiss action the way a `somcat` widget
+/// is, it just disappears on its own once yazi's cursor moves to a
+/// different file (`ADAPTOR.image_hide()`/`ClearInventory`, same
+/// lifecycle every other preview in this adapter already has).
+const AUDIO_WIDGET_COLUMNS: u16 = 40;
 const AUDIO_WIDGET_ROWS: u16 = 1;
 
 /// Every printable ASCII byte (`0x21..=0x7E`) except `"`, `'`, `\` — 91
@@ -389,12 +394,20 @@ impl Srp {
 		// Fixed footprint, clamped to whatever preview area is actually
 		// available — audio has no pixel dimensions to derive a footprint
 		// from the way an image does (see AUDIO_WIDGET_COLUMNS/ROWS's own
-		// doc comment).
+		// doc comment). Centered both horizontally and vertically within
+		// the preview pane rather than anchored to its top-left corner —
+		// unlike an image (which naturally fills however much of the
+		// pane its aspect ratio allows), this widget's footprint is
+		// small and fixed-size regardless of how large the preview pane
+		// is, so pinning it to a corner would leave it looking
+		// stranded/misaligned in a typical (much taller/wider) pane.
+		let width = AUDIO_WIDGET_COLUMNS.min(max.width);
+		let height = AUDIO_WIDGET_ROWS.min(max.height);
 		let area = Rect {
-			x:      max.x,
-			y:      max.y,
-			width:  AUDIO_WIDGET_COLUMNS.min(max.width),
-			height: AUDIO_WIDGET_ROWS.min(max.height),
+			x: max.x + (max.width.saturating_sub(width)) / 2,
+			y: max.y + (max.height.saturating_sub(height)) / 2,
+			width,
+			height,
 		};
 		let b2 = Self::place(&area, session_id, file_id)?;
 
