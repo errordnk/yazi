@@ -79,31 +79,6 @@ impl Adapter {
 		Srp::audio_show(path.into(), max).await
 	}
 
-	/// Markdown's counterpart to [`Self::audio_show`] — same "SRP-only,
-	/// bypass per-driver dispatch, call `Srp` directly" shape and the same
-	/// reasoning: markdown parsing/layout/rendering all happen on Som's
-	/// own receiving end (see `Srp::markdown_show`'s own doc comment), not
-	/// in this process, so no other `Driver` variant has anything
-	/// meaningful to do with a `.md` file either.
-	pub async fn markdown_show<P>(&self, path: P, max: Rect) -> Result<Rect>
-	where
-		P: Into<PathBuf>,
-	{
-		let probe = &EMULATOR.probe;
-		probe.wait(probe.id.get()).await;
-
-		let driver = self.driver.get_or_init(|| {
-			let driver = Drivers::matches(&EMULATOR);
-			driver.start();
-			driver
-		});
-		if *driver != Driver::Srp {
-			bail!("markdown preview requires Som's SRP driver, resolved driver is {driver}");
-		}
-
-		Srp::markdown_show(path.into(), max).await
-	}
-
 	pub fn shown_area(&self) -> Option<Rect> { self.shown.get() }
 
 	pub(super) fn shown_store(&self, area: Rect) { self.shown.set(Some(area)); }

@@ -72,26 +72,13 @@ impl Image {
 			.unwrap_or((YAZI.preview.max_width, YAZI.preview.max_height))
 	}
 
-	/// Converts a pixel-dimensioned image/video footprint into a cell
-	/// `Rect` — clamped to `rect` (the caller's own available area), not
-	/// just placed at its origin. An unclamped result here silently
-	/// mismatches `LAYOUT.get().preview` on the very next render tick
-	/// (`Preview::render` in `yazi-fm/src/mgr/preview.rs` skips drawing
-	/// the ENTIRE preview column, not just this placement, whenever the
-	/// placed area disagrees with the current layout rect) — confirmed
-	/// live as the root cause of SRP previews (images AND markdown)
-	/// vanishing outright rather than just being cropped/scrolled. Only
-	/// callers that already pre-downscale via `Image::downscale`/`max_
-	/// pixel` (the normal `image_show` path) were naturally safe before;
-	/// `Srp::show_image`/`stream_video` (which derive `size` from the raw
-	/// file's own header/a fixed constant, with no resize step) were not.
 	pub(super) fn pixel_area(size: (u32, u32), rect: Rect) -> Rect {
 		Dimension::cell_size()
 			.map(|(cw, ch)| Rect {
 				x:      rect.x,
 				y:      rect.y,
-				width:  ((size.0 as f64 / cw).ceil() as u16).min(rect.width).max(1),
-				height: ((size.1 as f64 / ch).ceil() as u16).min(rect.height).max(1),
+				width:  (size.0 as f64 / cw).ceil() as u16,
+				height: (size.1 as f64 / ch).ceil() as u16,
 			})
 			.unwrap_or(rect)
 	}

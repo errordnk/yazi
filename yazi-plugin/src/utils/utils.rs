@@ -27,9 +27,6 @@ pub fn compose(
 			// Audio
 			b"audio_show" => Utils::audio_show(lua)?,
 
-			// Markdown
-			b"markdown_show" => Utils::markdown_show(lua)?,
-
 			// JSON
 			b"json_encode" => Utils::json_encode(lua)?,
 			b"json_decode" => Utils::json_decode(lua)?,

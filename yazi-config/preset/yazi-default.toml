@@ -153,12 +153,6 @@ preloaders = [
 ]
 previewers = [
 	{ mime = "folder/*", run = "folder" },
-	# Markdown (matched by extension, not mime — mime detection for `.md`
-	# is unreliable across libmagic database versions, some tag it
-	# `text/markdown`, others fall through to plain `text/plain`; must
-	# come BEFORE the generic `text/*` -> code rule below, since TOML
-	# array order is first-match)
-	{ url = "*.md", run = "markdown" },
 	# Code
 	{ mime = "text/*", run = "code" },
 	{ mime = "application/{mbox,javascript,wine-extension-ini}", run = "code" },

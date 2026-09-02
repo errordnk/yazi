@@ -258,64 +258,6 @@ impl Srp {
 
 		Ok(area)
 	}
-
-	/// Markdown's counterpart to [`Self::audio_show`] — same "bypass the
-	/// per-driver `Driver::image_show` dispatch, call `Srp` directly"
-	/// shape, for the same reason: markdown rendering (parsing/layout/
-	/// styling) happens entirely on Som's OWN receiving end (see Som's
-	/// `terminal_view::markdown_styling`/`paint_rich_content_markdown_
-	/// widget`), not in this process — this function's only job is to
-	/// reserve a placeholder footprint and stream the raw `.md` bytes,
-	/// mirroring `somcat::print_markdown_placeholder_grid`/`stream_bytes`
-	/// exactly. Deliberately NATIVE-MARKDOWN-ONLY: no Lua (`@@@`/`@[...]`
-	/// markers) or form (`$[...]`/`$$$`) syntax recognition belongs here,
-	/// or anywhere in this driver — those are still just design notes, not
-	/// implemented on Som's receiving side either, and this driver's whole
-	/// job is to mirror what `somcat` already does today, not anticipate
-	/// features neither side has built yet.
-	pub async fn markdown_show(path: PathBuf, max: Rect) -> Result<Rect> {
-		let bytes = tokio::fs::read(&path).await?;
-		let content_metadata = ContentMetadata::Markdown;
-
-		let (session_id, file_id) = new_ids();
-		// UNLIKE `somcat::print_markdown_placeholder_grid` (which reserves
-		// the document's FULL height, relying on the real terminal's own
-		// scrollback for anything taller than the viewport), this grid is
-		// clamped to `max.height` — yazi's preview pane, unlike a real
-		// shell prompt, has no scrollback of its own to hold an oversized
-		// placement in; a grid taller than `max` here doesn't overflow
-		// into anything readable, it just mismatches yazi's own `LAYOUT.
-		// preview` rect on the very next render tick (`Preview::render` in
-		// `yazi-fm/src/mgr/preview.rs` skips rendering entirely when the
-		// placed area disagrees with the current layout), which is what
-		// made the ENTIRE 3rd (preview) column vanish, not just the
-		// markdown content — confirmed live: a 354-line `markdown.md`
-		// against a 48-row-tall preview pane produced a 267-row grid,
-		// and the column disappeared on the next frame. Width was already
-		// correctly clamped to `max.width`; height needs the same
-		// treatment.
-		let line_count = bytes.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
-		let width = max.width.max(1);
-		let height = line_count.min(max.height as u32).max(1) as u16;
-		let area = Rect { x: max.x, y: max.y, width, height };
-		let grid = place(&area, session_id, file_id)?;
-
-		ADAPTOR.image_hide()?;
-		ADAPTOR.shown_store(area);
-		Emulator::move_lock((area.x, area.y), |w| {
-			w.write_all(&grid)?;
-			Ok(area)
-		})?;
-
-		let content_type = ContentType::Markdown;
-		tokio::spawn(async move {
-			if let Err(err) = stream_bytes_task(bytes, content_type, content_metadata, session_id, file_id).await {
-				yazi_macro::error!("[Srp] streaming {path:?} failed: {err}");
-			}
-		});
-
-		Ok(area)
-	}
 }
 
 /// Derives a fresh `(session_id, file_id)` pair — time-derived and masked
