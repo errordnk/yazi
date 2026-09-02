@@ -1,6 +1,25 @@
 local M = {}
 
+-- `SOM_WINDOW_ID` is Som's own capability signal — see
+-- SRP_INTEGRATION_GUIDE.md's "Detecting that you're running inside Som"
+-- section. When set, video preview bypasses this plugin's usual ffmpeg-
+-- thumbnail-then-`ya.image_show` path entirely: `ya.image_show` is
+-- called with the REAL video file path (not a pre-rendered `cache`
+-- PNG), which `Srp::image_show`'s own extension-based routing (see
+-- `yazi-adapter/src/drivers/srp/mod.rs`) sends straight to `Srp::
+-- stream_video` — decode/playback/the play-pause-seek widget all
+-- happen entirely on Som's own receiving end (see that function's own
+-- doc comment), the same shape `audio.lua`/`markdown.lua` already use
+-- for their own SRP-only content types. Everywhere else, this plugin's
+-- original ffmpeg-thumbnail behavior is unchanged.
+local function inside_som() return os.getenv("SOM_WINDOW_ID") ~= nil end
+
 function M:peek(job)
+	if inside_som() then
+		local _, err = ya.image_show(job.file.url, job.area)
+		return ya.preview_widget(job, err)
+	end
+
 	local start, cache = os.clock(), ya.file_cache(job)
 	if not cache then
 		return

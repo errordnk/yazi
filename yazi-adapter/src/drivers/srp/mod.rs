@@ -190,7 +190,19 @@ impl Srp {
 		// showed a frame with a wrong/stale-looking bottom edge and no
 		// visible controls, exactly the missing-row-budget symptom, not
 		// a decode or seek bug.
-		let picture_area = Image::pixel_area((width_px, height_px), max);
+		//
+		// The row must be carved out of `max.height` BEFORE calling
+		// `Image::pixel_area`, not added afterward and re-clamped to
+		// `max.height` — a first attempt at this fix did the latter and
+		// was a complete no-op whenever the picture already filled the
+		// whole pane (`pixel_area` returns `height == max.height`
+		// exactly in that case, so `height + 1` immediately got clamped
+		// straight back down to `max.height`, silently eating the extra
+		// row it was supposed to add). Confirmed live: no widget row
+		// appeared at all, at any pane size, until this was fixed to
+		// reserve the row up front instead.
+		let picture_max = Rect { x: max.x, y: max.y, width: max.width, height: max.height.saturating_sub(1).max(1) };
+		let picture_area = Image::pixel_area((width_px, height_px), picture_max);
 		let area = Rect {
 			x: picture_area.x,
 			y: picture_area.y,
