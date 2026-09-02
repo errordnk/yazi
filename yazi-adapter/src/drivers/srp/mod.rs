@@ -178,7 +178,25 @@ impl Srp {
 		};
 
 		let (session_id, file_id) = new_ids();
-		let area = Image::pixel_area((width_px, height_px), max);
+		// One extra row beyond the picture itself, reserved for Som's own
+		// play/pause/seek-bar widget — mirrors `somcat::print_video_
+		// placeholder_grid`'s `rows + 1` exactly (see that function's own
+		// doc comment): Som paints the decoded frame into every row this
+		// placement has EXCEPT its last, and the widget into that last
+		// row (`terminal_element.rs`'s video branch, "Widget row sits
+		// immediately below the picture"). Without this extra row, Som
+		// paints the widget row OVER the bottom of the video frame
+		// instead of below it — confirmed live: yazi's own preview
+		// showed a frame with a wrong/stale-looking bottom edge and no
+		// visible controls, exactly the missing-row-budget symptom, not
+		// a decode or seek bug.
+		let picture_area = Image::pixel_area((width_px, height_px), max);
+		let area = Rect {
+			x: picture_area.x,
+			y: picture_area.y,
+			width: picture_area.width,
+			height: (picture_area.height + 1).min(max.height).max(1),
+		};
 		let grid = place(&area, session_id, file_id)?;
 
 		ADAPTOR.image_hide()?;
