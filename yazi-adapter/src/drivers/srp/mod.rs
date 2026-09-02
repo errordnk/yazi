@@ -41,6 +41,7 @@
 //!   deliberately NOT ported here).
 
 mod daemon;
+mod markdown_line_count;
 mod metadata;
 mod pipe;
 mod protocol;
@@ -294,7 +295,19 @@ impl Srp {
 		// and the column disappeared on the next frame. Width was already
 		// correctly clamped to `max.width`; height needs the same
 		// treatment.
-		let line_count = bytes.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
+		//
+		// The RENDERED row count (`markdown_line_count::count_rendered_
+		// lines`), not the raw file's newline count — markdown source
+		// formatting (extra blank lines, list item density, raw HTML
+		// blocks that render to nothing, etc.) doesn't map 1:1 onto
+		// rendered rows, so reserving `bytes`' own `\n` count left a real,
+		// visible gap between the widget's actual painted content and
+		// whatever came after it in the pane — the same bug found and
+		// fixed in `somcat::print_markdown_placeholder_grid` (Som's own
+		// repo), ported here so both clients reserve identical footprints
+		// for the same document.
+		let source = String::from_utf8_lossy(&bytes);
+		let line_count = markdown_line_count::count_rendered_lines(&source).max(1);
 		let width = max.width.max(1);
 		let height = line_count.min(max.height as u32).max(1) as u16;
 		let area = Rect { x: max.x, y: max.y, width, height };
