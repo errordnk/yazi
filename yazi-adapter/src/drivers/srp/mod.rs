@@ -50,7 +50,7 @@ mod srv_channel;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
@@ -445,22 +445,44 @@ async fn stream_bytes_task(bytes: Vec<u8>, content_type: ContentType, metadata: 
 	.await?
 }
 
-/// Sentinel meaning "no seek pending" — mirrors `somcat::NO_SEEK_PENDING`.
-const NO_SEEK_PENDING: u64 = u64::MAX;
+/// How much of the file's own FRONT to push proactively before settling
+/// into pure pull/responder mode — mirrors `somcat::ANNOUNCE_LEN` exactly.
+/// Deliberately small and bounded: just enough for `som-srv` to create
+/// its cache entry (`total_size`/`content_type`/`metadata`, needed
+/// before Som has anything to subscribe TO at all) and for Som's own
+/// decoder to have a real shot at probing the format without a round
+/// trip. Everything past this (including the rest of the front region,
+/// if the probe needs more) arrives only via `RequestByteRange`.
+const ANNOUNCE_LEN: u64 = 256 * 1024;
 
-enum SendOutcome {
-	Completed,
-	RedirectedTo(u64),
-}
+/// Video-only speculative tail fetch, alongside the front announce —
+/// mirrors `somcat::TAIL_FETCH_LEN` exactly. Non-faststart MP4 (`moov`
+/// atom at the end) and MKV with Cues near the end both need this: Som's
+/// `SeekFrom::End`-derived probe would otherwise need a full extra
+/// `RequestByteRange` round trip just to learn the tail even exists.
+const TAIL_FETCH_LEN: u64 = 4 * 1024 * 1024;
 
-/// Streams `path` off disk for video/audio — mirrors `somcat::stream_
-/// file_from_disk` exactly: a dedicated byte-range-responder connection
-/// (`SrvRequest::RegisterRangeResponder`) answers Som's seeks without
-/// competing for the sequential sender's own connection lock (see that
-/// protocol variant's own doc comment in Som for the multi-second-to-
-/// minutes seek latency this fixes), and the sequential sender restarts
-/// from wherever the latest seek landed instead of blindly continuing
-/// its own stale position.
+/// Streams `path` off disk for video/audio PULL-STYLE — mirrors
+/// `somcat::stream_file_from_disk` exactly: send a bounded front announce
+/// (`ANNOUNCE_LEN`) plus, for video, a bounded tail fetch (`TAIL_FETCH_
+/// LEN`), then register as the byte-range responder and answer `Request
+/// ByteRange` on demand for as long as this task's own responder thread
+/// keeps running — no more proactive sequential push past the initial
+/// announce/tail. This REPLACES an earlier "sequential push, `Request
+/// ByteRange` only as a fallback for stragglers" design (superseded in
+/// Som's own `somcat` first, ported here to match) — that design raced a
+/// fast local transfer finishing before Som had even subscribed, leaving
+/// nothing left to answer a stuck reader with on a large file.
+///
+/// UNLIKE `somcat` (a one-shot process that blocks in the foreground
+/// until playback ends, then exits), this is a `tokio::spawn`ed
+/// background task inside yazi's own long-running process — there is no
+/// "hold the terminal" concern here, so this function simply returns
+/// once the responder thread itself exits (on `EndPlayback`, a channel
+/// read error, or `stop_previous_media`'s own `StopPlayback` tearing the
+/// OLD placement down when the preview cursor moves to a different
+/// file — see `Adapter::stop_previous_media`'s own doc comment). The file
+/// handle and responder connection are released the same way either way.
 async fn stream_file_from_disk_task(
 	path: PathBuf,
 	content_type: ContentType,
@@ -472,14 +494,14 @@ async fn stream_file_from_disk_task(
 	tokio::task::spawn_blocking(move || -> Result<()> {
 		let file = std::fs::File::open(&path)?;
 		let shared_file = Arc::new(std::sync::Mutex::new(file));
-
-		let (stop, seek_signal, handle) =
-			spawn_byte_range_responder(shared_file.clone(), content_type, metadata.clone(), session_id, file_id, total_size)?;
-
 		let channel = SrvChannel::connect()?;
-		let mut start = 0u64;
-		let result = loop {
-			match send_range_chunks_interruptible(
+
+		let announce_len = ANNOUNCE_LEN.min(total_size);
+		send_range_chunks(&channel, &shared_file, content_type, metadata.clone(), session_id, file_id, total_size, 0, announce_len)?;
+
+		if content_type == ContentType::Video {
+			let tail_offset = total_size.saturating_sub(TAIL_FETCH_LEN);
+			let _ = send_range_chunks(
 				&channel,
 				&shared_file,
 				content_type,
@@ -487,33 +509,24 @@ async fn stream_file_from_disk_task(
 				session_id,
 				file_id,
 				total_size,
-				start,
-				total_size - start,
-				Some(&seek_signal),
-			) {
-				Ok(SendOutcome::Completed) => break Ok(()),
-				Ok(SendOutcome::RedirectedTo(new_start)) => {
-					start = new_start;
-					continue;
-				},
-				Err(err) => break Err(err),
-			}
-		};
-		stop.store(true, Ordering::Relaxed);
-		drop(handle);
-		result
+				tail_offset,
+				TAIL_FETCH_LEN,
+			);
+		}
+
+		let (_stop, handle) = spawn_byte_range_responder(shared_file, content_type, metadata, session_id, file_id, total_size)?;
+		let _ = handle.join();
+		Ok(())
 	})
 	.await?
 }
 
 /// Registers a SECOND connection as the dedicated target for `Request
-/// ByteRange` forwarding, then loops reading forwarded range requests
-/// off it and answering each with a one-off (non-interruptible) send —
-/// mirrors `somcat::spawn_byte_range_responder_from_disk` exactly,
-/// including raising `seek_signal` so the SEQUENTIAL sender (a separate
-/// thread, driven by `stream_file_from_disk_task`'s own loop above) can
-/// redirect itself to the new position instead of continuing to send
-/// now-stale bytes from its old one.
+/// ByteRange` forwarding, then loops answering forwarded range requests
+/// on demand — mirrors `somcat::spawn_byte_range_responder_from_disk`
+/// exactly, including reacting to `SrvRequest::EndPlayback` by exiting
+/// the loop instead of answering it (Som's signal that playback has
+/// definitively ended for this key, so there is nothing left to serve).
 #[allow(clippy::type_complexity)]
 fn spawn_byte_range_responder(
 	file: Arc<std::sync::Mutex<std::fs::File>>,
@@ -522,14 +535,12 @@ fn spawn_byte_range_responder(
 	session_id: u32,
 	file_id: u32,
 	total_size: u64,
-) -> Result<(Arc<AtomicBool>, Arc<AtomicU64>, std::thread::JoinHandle<()>)> {
+) -> Result<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> {
 	let channel = Arc::new(SrvChannel::connect()?);
 	channel.register_range_responder(session_id, file_id)?;
 
 	let stop = Arc::new(AtomicBool::new(false));
-	let seek_signal = Arc::new(AtomicU64::new(NO_SEEK_PENDING));
 	let stop_for_thread = stop.clone();
-	let seek_signal_for_thread = seek_signal.clone();
 	let handle = std::thread::spawn(move || {
 		loop {
 			if stop_for_thread.load(Ordering::Relaxed) {
@@ -542,39 +553,30 @@ fn spawn_byte_range_responder(
 					offset,
 					len,
 				})) if (req_session, req_file) == (session_id, file_id) => {
-					seek_signal_for_thread.store(offset, Ordering::Release);
-					let _ = send_range_chunks_interruptible(
-						&channel,
-						&file,
-						content_type,
-						metadata.clone(),
-						session_id,
-						file_id,
-						total_size,
-						offset,
-						len,
-						None,
-					);
+					let _ = send_range_chunks(&channel, &file, content_type, metadata.clone(), session_id, file_id, total_size, offset, len);
+				},
+				Ok(srv_channel::Incoming::Request(protocol::SrvRequest::EndPlayback {
+					session_id: req_session,
+					file_id: req_file,
+				})) if (req_session, req_file) == (session_id, file_id) => {
+					return;
 				},
 				Ok(_) => continue,
 				Err(_) => return,
 			}
 		}
 	});
-	Ok((stop, seek_signal, handle))
+	Ok((stop, handle))
 }
 
 /// Sends `[range_offset, range_offset + range_len)` as `CHUNK_SIZE`-sized
-/// `PutChunk`s, checking `seek_signal` (if given) between every chunk and
-/// stopping early — returning `SendOutcome::RedirectedTo` — the instant a
-/// DIFFERENT offset than `range_offset` shows up there. Mirrors `somcat::
-/// send_range_chunks_from_disk_interruptible` exactly, including the
-/// compare-and-clear on `seek_signal` (never reset by any writer, so the
-/// FIRST reader to observe a pending value must atomically claim it —
-/// confirmed live in Som's own history as `somcat` spinning forever
-/// resending one chunk near a seek target without this).
+/// `PutChunk`s — mirrors `somcat::send_range_chunks_from_disk` exactly.
+/// No seek-redirect logic (unlike the old, superseded interruptible
+/// version this replaces): the pull model has nothing to interrupt — a
+/// sender never has a stale in-flight sequential send to redirect away
+/// from, since it only ever sends exactly what was requested.
 #[allow(clippy::too_many_arguments)]
-fn send_range_chunks_interruptible(
+fn send_range_chunks(
 	channel: &SrvChannel,
 	file: &std::sync::Mutex<std::fs::File>,
 	content_type: ContentType,
@@ -584,8 +586,7 @@ fn send_range_chunks_interruptible(
 	total_size: u64,
 	range_offset: u64,
 	range_len: u64,
-	seek_signal: Option<&Arc<AtomicU64>>,
-) -> Result<SendOutcome> {
+) -> Result<()> {
 	use std::io::{Read as _, Seek as _, SeekFrom};
 
 	let range_len = range_len.min(total_size.saturating_sub(range_offset));
@@ -593,15 +594,6 @@ fn send_range_chunks_interruptible(
 	let end = range_offset + range_len;
 	let mut buf = vec![0u8; CHUNK_SIZE];
 	while offset < end {
-		if let Some(seek_signal) = seek_signal {
-			let pending = seek_signal.load(Ordering::Acquire);
-			if pending != NO_SEEK_PENDING
-				&& pending != offset
-				&& seek_signal.compare_exchange(pending, NO_SEEK_PENDING, Ordering::AcqRel, Ordering::Acquire).is_ok()
-			{
-				return Ok(SendOutcome::RedirectedTo(pending));
-			}
-		}
 		let piece_len = (end - offset).min(CHUNK_SIZE as u64) as usize;
 		{
 			let mut guard = file.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -611,7 +603,7 @@ fn send_range_chunks_interruptible(
 		channel.put_chunk(session_id, file_id, offset, buf[..piece_len].to_vec(), total_size, content_type, metadata.clone())?;
 		offset += piece_len as u64;
 	}
-	Ok(SendOutcome::Completed)
+	Ok(())
 }
 
 /// Real-transport integration tests — require a live `som-srv` daemon
@@ -648,6 +640,14 @@ mod tests {
 		assert!(result.is_ok(), "streaming a real GIF over a live som-srv connection failed: {result:?}");
 	}
 
+	/// Since the pull-model redesign, `stream_file_from_disk_task` sends a
+	/// bounded announce/tail then blocks in its own responder thread until
+	/// `SrvRequest::EndPlayback` arrives (or the connection errors) — see
+	/// that function's own doc comment. A test exercising it therefore
+	/// needs to send `EndPlayback` itself (standing in for Som, via
+	/// `SrvChannel::end_playback_for_test`) to ever let the task return,
+	/// instead of just awaiting it directly the way the OLD sequential-
+	/// push design's test used to.
 	#[test]
 	fn stream_file_from_disk_task_delivers_a_real_video_over_a_real_som_srv_connection() {
 		let path = std::path::PathBuf::from(r"C:\home\dnk\som\sample_1920x1080.mkv");
@@ -668,8 +668,33 @@ mod tests {
 			subtitle_stream_index: None,
 			extension: "mkv".to_string(),
 		};
-		let result =
-			rt.block_on(stream_file_from_disk_task(path.clone(), ContentType::Video, metadata, session_id, file_id, total_size));
+		let task = rt.spawn(stream_file_from_disk_task(path.clone(), ContentType::Video, metadata, session_id, file_id, total_size));
+
+		// Send `EndPlayback` repeatedly on a short interval, in the
+		// background, until the task itself exits — a SUCCESSFUL send
+		// only means the daemon accepted the message, not that it was
+		// actually delivered to a registered range-responder route (the
+		// task hasn't necessarily called `RegisterRangeResponder` yet,
+		// since it sends its announce chunk and — for video — a bounded
+		// tail fetch first; see `stream_file_from_disk_task`'s own doc
+		// comment). A single fixed-delay attempt is therefore unreliable;
+		// retrying is what actually guarantees delivery once the route
+		// exists, without needing to reach into the task's own internal
+		// state from this test.
+		let stop_retrying = Arc::new(AtomicBool::new(false));
+		let stop_retrying_for_thread = stop_retrying.clone();
+		let retry_handle = std::thread::spawn(move || {
+			while !stop_retrying_for_thread.load(Ordering::Relaxed) {
+				let _ = SrvChannel::end_playback_for_test(session_id, file_id);
+				std::thread::sleep(std::time::Duration::from_millis(200));
+			}
+		});
+
+		let result = rt.block_on(async {
+			tokio::time::timeout(std::time::Duration::from_secs(15), task).await.expect("task did not exit after EndPlayback")
+		});
+		stop_retrying.store(true, Ordering::Relaxed);
+		let _ = retry_handle.join();
 
 		assert!(result.is_ok(), "streaming a real video file over a live som-srv connection failed: {result:?}");
 	}

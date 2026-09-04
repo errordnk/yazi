@@ -190,6 +190,16 @@ pub enum SrvRequest {
 	/// placeholder cells alone leaves the old player decoding/playing
 	/// with no widget left to reach it.
 	StopPlayback { session_id: u32, file_id: u32 },
+	/// Forwarded verbatim by the daemon to whichever connection is
+	/// registered as the range responder for `(session_id, file_id)` —
+	/// the REVERSE direction of `StopPlayback` above: Som sends this,
+	/// telling THIS driver playback has definitively ended (natural EOF
+	/// or the widget's own stop icon), so the responder thread serving
+	/// that key should stop. This driver only ever RECEIVES this variant
+	/// (as an `Incoming::Request`), never sends it. See `som_srv::
+	/// protocol::SrvRequest::EndPlayback`'s own doc comment in Som's repo
+	/// for the full rationale.
+	EndPlayback { session_id: u32, file_id: u32 },
 }
 
 /// Mirrors the CLIENT-relevant subset of `som_srv::protocol::SrvResponse`

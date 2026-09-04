@@ -81,6 +81,25 @@ impl SrvChannel {
 		}
 		send(&connection, &SrvRequest::StopPlayback { session_id, file_id })
 	}
+
+	/// Test-only: sends `SrvRequest::EndPlayback` directly, standing in
+	/// for Som (the real, only legitimate sender of this message) so a
+	/// headless test can unblock `spawn_byte_range_responder`'s read loop
+	/// without a live Som window. Same fresh-one-shot-connection shape as
+	/// `stop_playback` above — the daemon routes this to whichever
+	/// connection registered as the range responder for `(session_id,
+	/// file_id)`, exactly like it would for a real Som-originated one.
+	#[cfg(test)]
+	pub fn end_playback_for_test(session_id: u32, file_id: u32) -> anyhow::Result<()> {
+		let connection = daemon::connect_or_spawn()?;
+		ConnectionKind::Srv.write_to(&connection)?;
+		send(&connection, &SrvRequest::Handshake(HandshakeInfo::current()))?;
+		match read_any(&connection)? {
+			Incoming::Response(SrvResponse::Handshake(_)) => {},
+			other => anyhow::bail!("expected Handshake as som-srv's first reply, got {other:?}"),
+		}
+		send(&connection, &SrvRequest::EndPlayback { session_id, file_id })
+	}
 }
 
 fn send(connection: &PipeConnection, message: &SrvRequest) -> anyhow::Result<()> {
