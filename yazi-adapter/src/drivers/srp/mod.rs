@@ -55,7 +55,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use ratatui_core::layout::Rect;
-use yazi_emulator::Emulator;
+use yazi_emulator::{Dimension, Emulator};
 
 use crate::{ADAPTOR, drivers::diacritics::DIACRITICS, image::Image};
 use protocol::{ContentMetadata, ContentType};
@@ -87,6 +87,16 @@ const AUDIO_WIDGET_ROWS: u16 = 1;
 pub struct Srp;
 
 impl Srp {
+	/// Thin public re-export of `SrvChannel::stop_playback` — `SrvChannel`
+	/// itself lives in this module's private `srv_channel` submodule, so
+	/// `Adapter::stop_previous_media` (in `adapter.rs`, a sibling module)
+	/// reaches it through here rather than needing `srv_channel` made
+	/// `pub`. See `SrvRequest::StopPlayback`'s own doc comment (in Som's
+	/// repo) for the full rationale.
+	pub fn stop_playback(session_id: u32, file_id: u32) -> Result<()> {
+		srv_channel::SrvChannel::stop_playback(session_id, file_id)
+	}
+
 	pub(super) async fn image_show(path: PathBuf, max: Rect) -> Result<Rect> {
 		let extension = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
 		match extension.as_deref() {
@@ -167,6 +177,7 @@ impl Srp {
 	async fn stream_video(path: PathBuf, max: Rect) -> Result<Rect> {
 		let total_size = tokio::fs::metadata(&path).await?.len();
 		let (width_px, height_px) = (VIDEO_PLACEHOLDER_WIDTH_PX, VIDEO_PLACEHOLDER_HEIGHT_PX);
+		let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default().to_string();
 		let metadata = ContentMetadata::Video {
 			width_px,
 			height_px,
@@ -175,6 +186,7 @@ impl Srp {
 			codec: protocol::VideoCodec::Unknown,
 			audio_stream_index: None,
 			subtitle_stream_index: None,
+			extension,
 		};
 
 		let (session_id, file_id) = new_ids();
@@ -186,33 +198,44 @@ impl Srp {
 		// row (`terminal_element.rs`'s video branch, "Widget row sits
 		// immediately below the picture"). Without this extra row, Som
 		// paints the widget row OVER the bottom of the video frame
-		// instead of below it — confirmed live: yazi's own preview
-		// showed a frame with a wrong/stale-looking bottom edge and no
-		// visible controls, exactly the missing-row-budget symptom, not
-		// a decode or seek bug.
+		// instead of below it.
 		//
-		// The row must be carved out of `max.height` BEFORE calling
-		// `Image::pixel_area`, not added afterward and re-clamped to
-		// `max.height` — a first attempt at this fix did the latter and
-		// was a complete no-op whenever the picture already filled the
-		// whole pane (`pixel_area` returns `height == max.height`
-		// exactly in that case, so `height + 1` immediately got clamped
-		// straight back down to `max.height`, silently eating the extra
-		// row it was supposed to add). Confirmed live: no widget row
-		// appeared at all, at any pane size, until this was fixed to
-		// reserve the row up front instead.
-		let picture_max = Rect { x: max.x, y: max.y, width: max.width, height: max.height.saturating_sub(1).max(1) };
-		let picture_area = Image::pixel_area((width_px, height_px), picture_max);
-		let area = Rect {
-			x: picture_area.x,
-			y: picture_area.y,
-			width: picture_area.width,
-			height: (picture_area.height + 1).min(max.height).max(1),
+		// UNLIKE `Image::pixel_area` (used by `show_image` for arbitrary
+		// still images, where clamping width/height independently is
+		// correct — a picture is free to fill whatever box it's given),
+		// this computes the picture's footprint by preserving the video's
+		// own `width_px:height_px` aspect ratio (16:9, from the fixed
+		// `VIDEO_PLACEHOLDER_WIDTH_PX`/`HEIGHT_PX` constants — see
+		// `metadata.rs`'s own doc comment for why real ffprobe dimensions
+		// aren't available here) against the pane's available WIDTH only,
+		// then deriving height from that ratio — NOT independently
+		// clamping height to `picture_max.height` the way `pixel_area`
+		// does. A tall/narrow preview pane (portrait-oriented relative to
+		// 16:9) would otherwise reserve far MORE height than a letterboxed
+		// 16:9 frame actually needs, leaving the widget row stranded near
+		// the bottom of the pane with a visible gap above it instead of
+		// sitting immediately below the picture — confirmed live.
+		let picture_max_height = max.height.saturating_sub(1).max(1);
+		let area = match Dimension::cell_size() {
+			Some((cw, ch)) => {
+				let aspect = height_px as f64 / width_px as f64;
+				let picture_columns = (width_px as f64 / cw).ceil() as u16;
+				let columns = picture_columns.min(max.width).max(1);
+				let pixel_width = columns as f64 * cw;
+				let pixel_height = pixel_width * aspect;
+				let picture_rows = ((pixel_height / ch).ceil() as u16).min(picture_max_height).max(1);
+				Rect { x: max.x, y: max.y, width: columns, height: (picture_rows + 1).min(max.height).max(1) }
+			},
+			None => max,
 		};
 		let grid = place(&area, session_id, file_id)?;
 
 		ADAPTOR.image_hide()?;
 		ADAPTOR.shown_store(area);
+		// See `Adapter::stop_previous_media`'s own doc comment — this
+		// records the id so the NEXT `*_show` call (of any content type)
+		// tells Som to stop THIS placement's player if it's still open.
+		ADAPTOR.record_media_id(session_id, file_id);
 		Emulator::move_lock((area.x, area.y), |w| {
 			w.write_all(&grid)?;
 			Ok(area)
@@ -259,7 +282,8 @@ impl Srp {
 		})
 		.await?
 		.unwrap_or((0, 0, 0, 0));
-		let content_metadata = ContentMetadata::Audio { sample_rate, channels, bits_per_sample, duration_ms };
+		let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default().to_string();
+		let content_metadata = ContentMetadata::Audio { sample_rate, channels, bits_per_sample, duration_ms, extension };
 
 		let (session_id, file_id) = new_ids();
 		let width = AUDIO_WIDGET_COLUMNS.min(max.width);
@@ -274,6 +298,8 @@ impl Srp {
 
 		ADAPTOR.image_hide()?;
 		ADAPTOR.shown_store(area);
+		// See `Adapter::stop_previous_media`'s own doc comment.
+		ADAPTOR.record_media_id(session_id, file_id);
 		Emulator::move_lock((area.x, area.y), |w| {
 			w.write_all(&grid)?;
 			Ok(area)
@@ -411,7 +437,7 @@ async fn stream_bytes_task(bytes: Vec<u8>, content_type: ContentType, metadata: 
 		let total_size = bytes.len() as u64;
 		let mut offset = 0u64;
 		for chunk in bytes.chunks(CHUNK_SIZE) {
-			channel.put_chunk(session_id, file_id, offset, chunk.to_vec(), total_size, content_type, metadata)?;
+			channel.put_chunk(session_id, file_id, offset, chunk.to_vec(), total_size, content_type, metadata.clone())?;
 			offset += chunk.len() as u64;
 		}
 		Ok(())
@@ -447,7 +473,8 @@ async fn stream_file_from_disk_task(
 		let file = std::fs::File::open(&path)?;
 		let shared_file = Arc::new(std::sync::Mutex::new(file));
 
-		let (stop, seek_signal, handle) = spawn_byte_range_responder(shared_file.clone(), content_type, metadata, session_id, file_id, total_size)?;
+		let (stop, seek_signal, handle) =
+			spawn_byte_range_responder(shared_file.clone(), content_type, metadata.clone(), session_id, file_id, total_size)?;
 
 		let channel = SrvChannel::connect()?;
 		let mut start = 0u64;
@@ -456,7 +483,7 @@ async fn stream_file_from_disk_task(
 				&channel,
 				&shared_file,
 				content_type,
-				metadata,
+				metadata.clone(),
 				session_id,
 				file_id,
 				total_size,
@@ -520,7 +547,7 @@ fn spawn_byte_range_responder(
 						&channel,
 						&file,
 						content_type,
-						metadata,
+						metadata.clone(),
 						session_id,
 						file_id,
 						total_size,
@@ -581,7 +608,7 @@ fn send_range_chunks_interruptible(
 			guard.seek(SeekFrom::Start(offset))?;
 			guard.read_exact(&mut buf[..piece_len])?;
 		}
-		channel.put_chunk(session_id, file_id, offset, buf[..piece_len].to_vec(), total_size, content_type, metadata)?;
+		channel.put_chunk(session_id, file_id, offset, buf[..piece_len].to_vec(), total_size, content_type, metadata.clone())?;
 		offset += piece_len as u64;
 	}
 	Ok(SendOutcome::Completed)
@@ -639,6 +666,7 @@ mod tests {
 			codec: protocol::VideoCodec::Unknown,
 			audio_stream_index: None,
 			subtitle_stream_index: None,
+			extension: "mkv".to_string(),
 		};
 		let result =
 			rt.block_on(stream_file_from_disk_task(path.clone(), ContentType::Video, metadata, session_id, file_id, total_size));

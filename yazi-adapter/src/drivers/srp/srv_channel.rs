@@ -64,6 +64,23 @@ impl SrvChannel {
 	pub fn register_range_responder(&self, session_id: u32, file_id: u32) -> anyhow::Result<()> {
 		send(&self.connection, &SrvRequest::RegisterRangeResponder { session_id, file_id })
 	}
+
+	/// Sends `SrvRequest::StopPlayback` — see that variant's own doc
+	/// comment. A fresh one-shot connection (mirroring `RequestByteRange`'s
+	/// own shape on Som's side): whatever connection is currently
+	/// streaming/responding for `(session_id, file_id)` has nothing to do
+	/// with delivering this, since it's forwarded to SOM's subscription
+	/// connection, not back to the sender.
+	pub fn stop_playback(session_id: u32, file_id: u32) -> anyhow::Result<()> {
+		let connection = daemon::connect_or_spawn()?;
+		ConnectionKind::Srv.write_to(&connection)?;
+		send(&connection, &SrvRequest::Handshake(HandshakeInfo::current()))?;
+		match read_any(&connection)? {
+			Incoming::Response(SrvResponse::Handshake(_)) => {},
+			other => anyhow::bail!("expected Handshake as som-srv's first reply, got {other:?}"),
+		}
+		send(&connection, &SrvRequest::StopPlayback { session_id, file_id })
+	}
 }
 
 fn send(connection: &PipeConnection, message: &SrvRequest) -> anyhow::Result<()> {

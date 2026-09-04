@@ -128,10 +128,16 @@ pub enum VideoCodec {
 }
 
 /// Mirrors `som_srv::protocol::ContentMetadata` field-for-field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `extension` (Audio/Video only) is the original file extension without
+/// the leading dot (e.g. `"mp4"`, `"mkv"`) — som-srv never decodes media
+/// itself, so this is the only way the Som-side decoder learns the real
+/// container format once there's no on-disk path left to inspect. Must
+/// stay a plain `String` (not `Copy`) — see the `Clone`-only derive here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentMetadata {
 	Image { width_px: u32, height_px: u32, color_bits: u8, is_animated: bool },
-	Audio { sample_rate: u32, channels: u8, bits_per_sample: u8, duration_ms: u32 },
+	Audio { sample_rate: u32, channels: u8, bits_per_sample: u8, duration_ms: u32, extension: String },
 	Video {
 		width_px: u32,
 		height_px: u32,
@@ -140,6 +146,7 @@ pub enum ContentMetadata {
 		codec: VideoCodec,
 		audio_stream_index: Option<u32>,
 		subtitle_stream_index: Option<u32>,
+		extension: String,
 	},
 	Markdown,
 }
@@ -173,6 +180,16 @@ pub enum SrvRequest {
 	/// comment for why a shared connection would otherwise starve seek
 	/// responses behind mutex contention on a large in-flight transfer.
 	RegisterRangeResponder { session_id: u32, file_id: u32 },
+	/// Sent on a fresh, one-shot connection — the reverse direction of
+	/// `RequestByteRange`: this driver SENDS this, never receives it (Som
+	/// is always the one subscribed and listening for it). See
+	/// `som_srv::protocol::SrvRequest::StopPlayback`'s own doc comment in
+	/// Som's repo for the full rationale — tells Som to tear down an
+	/// audio/video placement's player when yazi's preview cursor moves to
+	/// a different file, since overwriting the old placement's
+	/// placeholder cells alone leaves the old player decoding/playing
+	/// with no widget left to reach it.
+	StopPlayback { session_id: u32, file_id: u32 },
 }
 
 /// Mirrors the CLIENT-relevant subset of `som_srv::protocol::SrvResponse`
