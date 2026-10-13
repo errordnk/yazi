@@ -96,6 +96,45 @@ impl Image {
 			.unwrap_or(rect)
 	}
 
+	/// Same job as `pixel_area`, but preserves `size`'s own aspect
+	/// ratio instead of clamping width and height independently —
+	/// `pixel_area`'s independent clamp only avoids distortion when
+	/// the caller has ALREADY resized the source to fit the box (the
+	/// normal `image_show`/`precache` path, via `Image::flip_size`
+	/// upstream); `Srp::show_image`/`stream_video` hand it the raw,
+	/// unresized file dimensions instead, so an aspect ratio that
+	/// doesn't match the pane's own gets stretched/squashed — visible
+	/// live as a GIF preview looking noticeably wider/flatter than the
+	/// source. Fits `size`'s aspect ratio against the pane's available
+	/// WIDTH only, then derives height from that ratio (terminal cells
+	/// aren't square, so this conversion has to happen in pixel space,
+	/// not by naively reusing the column count as a row count) —
+	/// mirrors `stream_video`'s own former inline version of this exact
+	/// computation, kept here as one shared implementation instead of
+	/// two copies that could drift. `extra_rows` reserves additional
+	/// rows below the picture itself (video's own play/pause/seek-bar
+	/// widget row; pass 0 for plain images, which have no such widget).
+	pub(super) fn pixel_area_aspect_correct(size: (u32, u32), rect: Rect, extra_rows: u16) -> Rect {
+		let (width_px, height_px) = size;
+		let picture_max_height = rect.height.saturating_sub(extra_rows).max(1);
+		Dimension::cell_size()
+			.map(|(cw, ch)| {
+				let aspect = height_px as f64 / width_px as f64;
+				let picture_columns = (width_px as f64 / cw).ceil() as u16;
+				let columns = picture_columns.min(rect.width).max(1);
+				let pixel_width = columns as f64 * cw;
+				let pixel_height = pixel_width * aspect;
+				let picture_rows = ((pixel_height / ch).ceil() as u16).min(picture_max_height).max(1);
+				Rect {
+					x: rect.x,
+					y: rect.y,
+					width: columns,
+					height: (picture_rows + extra_rows).min(rect.height).max(1),
+				}
+			})
+			.unwrap_or(rect)
+	}
+
 	fn filter() -> FilterType {
 		match YAZI.preview.image_filter.as_str() {
 			"nearest" => FilterType::Nearest,

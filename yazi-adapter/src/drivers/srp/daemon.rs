@@ -20,13 +20,20 @@ use std::time::Duration;
 const CONNECT_RETRY_ATTEMPTS: u32 = 20;
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
-/// `~/.local/bin/som-srv` (`.exe` on Windows) — the one fixed location
-/// this driver ever looks in. `None` if `$HOME`/`%USERPROFILE%` can't be
-/// determined at all (no sensible fallback in that case).
-fn daemon_binary_path() -> Option<PathBuf> {
-	let home = dirs_home()?;
-	let name = if cfg!(target_os = "windows") { "som-srv.exe" } else { "som-srv" };
-	Some(home.join(".local").join("bin").join(name))
+/// Locations this driver looks for the `somsrv` daemon binary (`.exe` on
+/// Windows), in order: next to this executable (a release that ships
+/// `yazi` and `somsrv` together), `~/.local/bin`, then `~/bin`.
+fn daemon_binary_candidates() -> Vec<PathBuf> {
+	let name = if cfg!(target_os = "windows") { "somsrv.exe" } else { "somsrv" };
+	let mut candidates = Vec::new();
+	if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from)) {
+		candidates.push(dir.join(name));
+	}
+	if let Some(home) = dirs_home() {
+		candidates.push(home.join(".local").join("bin").join(name));
+		candidates.push(home.join("bin").join(name));
+	}
+	candidates
 }
 
 #[cfg(windows)]
@@ -40,7 +47,7 @@ fn dirs_home() -> Option<PathBuf> {
 }
 
 /// Tries to connect to the daemon's fixed socket first; if nothing's
-/// listening, spawns a detached `~/.local/bin/som-srv --daemon` and
+/// listening, spawns a detached `somsrv --daemon` and
 /// retries until it comes up (or gives up). Returns the raw, untagged
 /// connection — the caller still writes `ConnectionKind::Srv` before
 /// anything else, same as `som_srv::daemon::connect_or_spawn`'s own
@@ -52,14 +59,13 @@ pub fn connect_or_spawn() -> anyhow::Result<PipeConnection> {
 		return Ok(connection);
 	}
 
-	let daemon_binary_path = daemon_binary_path()
-		.ok_or_else(|| anyhow::anyhow!("could not determine home directory to locate ~/.local/bin/som-srv"))?;
-	if !daemon_binary_path.is_file() {
+	let candidates = daemon_binary_candidates();
+	let Some(daemon_binary_path) = candidates.iter().find(|path| path.is_file()).cloned() else {
 		anyhow::bail!(
-			"som-srv daemon not running and no binary found at {daemon_binary_path:?} \
-			 (install Som's som-srv there to enable SRP rich content in yazi)"
+			"somsrv daemon not running and no binary found in any of {candidates:?} \
+			 (install Som's somsrv in one of them to enable SRP rich content in yazi)"
 		);
-	}
+	};
 	spawn_detached(&daemon_binary_path)?;
 
 	for attempt in 0..CONNECT_RETRY_ATTEMPTS {
@@ -69,7 +75,7 @@ pub fn connect_or_spawn() -> anyhow::Result<PipeConnection> {
 			Err(err) => return Err(err),
 		}
 	}
-	anyhow::bail!("could not connect to som-srv daemon at {socket_path:?} after spawning {daemon_binary_path:?}")
+	anyhow::bail!("could not connect to somsrv daemon at {socket_path:?} after spawning {daemon_binary_path:?}")
 }
 
 #[cfg(target_os = "windows")]

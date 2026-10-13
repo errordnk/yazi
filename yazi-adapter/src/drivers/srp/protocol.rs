@@ -27,13 +27,13 @@ use serde::{Deserialize, Serialize};
 /// (this driver, running inside `ya`/`yazi`) finds the same daemon Som's
 /// own `somcat`/`crates/terminal` clients connect to.
 #[cfg(windows)]
-pub fn daemon_socket_path() -> String { r"\\.\pipe\som-srv".to_string() }
+pub fn daemon_socket_path() -> String { r"\\.\pipe\somsrv".to_string() }
 
 #[cfg(unix)]
 pub fn daemon_socket_path() -> String {
 	let dir = std::path::Path::new("/tmp");
 	let _ = std::fs::create_dir_all(dir);
-	dir.join(format!("som-srv-{}.sock", unsafe { libc::getuid() })).to_string_lossy().into_owned()
+	dir.join(format!("somsrv-{}.sock", unsafe { libc::getuid() })).to_string_lossy().into_owned()
 }
 
 /// Mirrors `som_srv::protocol::Os` — part of `HandshakeInfo`, which the

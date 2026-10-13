@@ -55,7 +55,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use ratatui_core::layout::Rect;
-use yazi_emulator::{Dimension, Emulator};
+use yazi_emulator::Emulator;
 
 use crate::{ADAPTOR, drivers::diacritics::DIACRITICS, image::Image};
 use protocol::{ContentMetadata, ContentType};
@@ -141,7 +141,7 @@ impl Srp {
 		.await??;
 
 		let (session_id, file_id) = new_ids();
-		let area = Image::pixel_area((width_px, height_px), max);
+		let area = Image::pixel_area_aspect_correct((width_px, height_px), max, 0);
 		let grid = place(&area, session_id, file_id)?;
 
 		ADAPTOR.image_hide()?;
@@ -198,36 +198,21 @@ impl Srp {
 		// row (`terminal_element.rs`'s video branch, "Widget row sits
 		// immediately below the picture"). Without this extra row, Som
 		// paints the widget row OVER the bottom of the video frame
-		// instead of below it.
-		//
-		// UNLIKE `Image::pixel_area` (used by `show_image` for arbitrary
-		// still images, where clamping width/height independently is
-		// correct — a picture is free to fill whatever box it's given),
-		// this computes the picture's footprint by preserving the video's
-		// own `width_px:height_px` aspect ratio (16:9, from the fixed
+		// instead of below it. Aspect ratio (16:9, from the fixed
 		// `VIDEO_PLACEHOLDER_WIDTH_PX`/`HEIGHT_PX` constants — see
 		// `metadata.rs`'s own doc comment for why real ffprobe dimensions
-		// aren't available here) against the pane's available WIDTH only,
-		// then deriving height from that ratio — NOT independently
-		// clamping height to `picture_max.height` the way `pixel_area`
-		// does. A tall/narrow preview pane (portrait-oriented relative to
-		// 16:9) would otherwise reserve far MORE height than a letterboxed
-		// 16:9 frame actually needs, leaving the widget row stranded near
-		// the bottom of the pane with a visible gap above it instead of
-		// sitting immediately below the picture — confirmed live.
-		let picture_max_height = max.height.saturating_sub(1).max(1);
-		let area = match Dimension::cell_size() {
-			Some((cw, ch)) => {
-				let aspect = height_px as f64 / width_px as f64;
-				let picture_columns = (width_px as f64 / cw).ceil() as u16;
-				let columns = picture_columns.min(max.width).max(1);
-				let pixel_width = columns as f64 * cw;
-				let pixel_height = pixel_width * aspect;
-				let picture_rows = ((pixel_height / ch).ceil() as u16).min(picture_max_height).max(1);
-				Rect { x: max.x, y: max.y, width: columns, height: (picture_rows + 1).min(max.height).max(1) }
-			},
-			None => max,
-		};
+		// aren't available here) is preserved via the same
+		// `Image::pixel_area_aspect_correct` helper `show_image` uses
+		// (extracted from what used to be this function's own inline copy
+		// of this computation, after a live-confirmed regression: `show_
+		// image`'s separate, aspect-NAIVE `Image::pixel_area` stretched/
+		// squashed still images and GIFs whenever their aspect ratio didn't
+		// match the pane's own, since clamping width and height
+		// independently in cell space distorts non-square-cell terminals'
+		// output — confirmed live 2026-09-14 as a visibly flattened GIF
+		// preview; video was never affected because it already had this
+		// separate correct computation, now shared instead of duplicated).
+		let area = Image::pixel_area_aspect_correct((width_px, height_px), max, 1);
 		let grid = place(&area, session_id, file_id)?;
 
 		ADAPTOR.image_hide()?;
